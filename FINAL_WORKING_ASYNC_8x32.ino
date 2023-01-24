@@ -1,0 +1,550 @@
+/*
+
+
+   Able to make async HTTPS requests using both cores, one to process requests and the other to send them as well as do the rest of the stuff
+
+
+   -------------------------------------------------------------------------------
+
+              -------------------- TODO LIST --------------------
+
+          Make a local webserver to input the wifi name and password
+          Print Debug info to seperate webpage in that webserver
+          Find new way to seperate data from DB instead of using 8 delimiters
+          Have option to get static time with weather icon
+          GET HTTPS ASYNC LIBRARY WORKING
+
+
+   -------------------------------------------------------------------------------
+
+*/
+
+
+// Include these files that make the main file look nicer
+#include "DBLibraries.h"
+#include "DBVariables.h"
+#include "DBTestRootCertificate.h"
+
+#define NUM_LEDS (MATRIX_WIDTH*MATRIX_HEIGHT) // Calculates the number of LEDs based on the height times the width
+
+AsyncWebServer server(80); //starts to read the web HTML with the port 80
+AsyncHTTPRequest request;  // Request for AlexsRandomTech
+AsyncHTTPRequest request2; // Request for the weather
+
+// Tickers to attach to each of the requests and send each HTTP request asynchronously
+Ticker ticker;
+Ticker ticker1;
+
+// the Wifi radio's status
+int status;
+
+// Time client stuff
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+WiFiClientSecure clientForOta;
+
+WiFiClient clientSTA; // client mod for station mod
+
+// Object to remote update the Esp32
+secureEsp32FOTA secureEsp32FOTA("Async_Message_Board", ASYNC_MESSAGE_BOARD_VERSION); // (Firmware String, and firmware float)
+
+// GMT Offest and server for the time
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 0;
+const int   daylightOffset_sec = (3600 * -6) - 1;
+
+// Variables to capture the date, day, and time
+String formattedDate, dayStamp, timeStamp;
+String hour = "", minute = "";
+
+// Variable to test if the word needs to be reset to right side of matrix
+static bool textPass = true;
+
+// Variables to read the DB every 5 seconds instead of using delay()
+unsigned long currentMillis, previousMillis;
+unsigned long Read_DB_Frequency = 5000;
+
+// Variables to store data from DB
+String DB_Name, DB_Word, DB_Brightness, DB_TextColor, DB_BackgroundColor, DB_AllOn, DB_String, DB_VersionNumber, weatherData, weatherTemp, weatherImage, selection;
+
+// Delimiter to seperate the data from the DB
+const char delimiter = '`';
+
+// Variables to store the position of each delimiter in the string
+int delimiter1, delimiter2, delimiter3, delimiter4, delimiter5, delimiter6, delimiter7, delimiter8;
+
+// Variable to control the continuity of the rainbow() function
+static int rainbowCounter;
+
+// makes an array with the amount of lights
+CRGB leds[NUM_LEDS];
+
+// Creates a new matrix with the correct settings based on the matrix
+FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(leds, MATRIX_WIDTH, MATRIX_HEIGHT,
+    NEO_MATRIX_BOTTOM     + NEO_MATRIX_RIGHT + //the matrix starts in the top right and goes in rows in zigzag pattern
+    NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG );
+
+// Controls how long the delay for the word to leave the screen must be
+int textDelay;
+
+// Sets the startup text color and background color
+uint16_t textColor = matrix->Color(255, 255, 255);
+uint16_t backgroundColor = matrix->Color(0, 0, 0);
+
+// Initalizes the background colors and the array that holds the positions for the border pixels
+int backgroundColorR = 0, backgroundColorG = 0, backgroundColorB = 0;
+int border[(MATRIX_WIDTH * 2)+((MATRIX_HEIGHT * 2) - 2)];
+
+void setup() {
+  // Starts the Serial Output on the baud rate of 115200
+  Serial.begin(115200);
+
+  // Continue while the serial is available
+  while (!Serial);
+
+  // Set the WiFi mode so that the ESP32 can connect to a network
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password); // connects the ESP to the wifi
+  while (WiFi.status() != WL_CONNECTED) {//test if the wifi is connected or not
+    delay(500);
+    Serial.print(".");
+  }
+
+  FastLED.addLeds<NEOPIXEL, PIN>(leds, NUM_LEDS);     //Initalizes the leds
+  matrix->begin();                                    //Starts the matrix
+  matrix->setTextWrap(false);                         //If false, the letters will appear line by line
+  matrix->setBrightness(16);                          //Controls the brightness of the LEDs on startup (default is 16/255)
+  matrix->setTextColor(textColor);                    //Controls the color of the text
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // Gets the time with the daylight and gmtOffset
+
+  timeClient.begin();
+  timeClient.setTimeOffset(daylightOffset_sec);
+
+  int index = 0;
+  for (int i = 0; i < NUM_LEDS + 1; i++) {
+    if ((i <  7)) { // left
+      border[index] = i;
+      index++;
+    }
+    if (i % 16 == 8) { // bottom
+      border[index] = i - 1;
+      index++;
+      border[index] = i;
+      index++;
+    }
+    if ((i >  256 - 8) && (i != 255)) { // right
+      border[index] = i;
+      index++;
+    }
+  }
+  for (int i = NUM_LEDS; i > 0; i--) {
+    if (i % 16 == 0) { // top
+      border[index] = i;
+      index++;
+      border[index] = i - 1;
+      index++;
+    }
+  }
+
+  request.onReadyStateChange(requestCB);
+  ticker.attach(HTTP_REQUEST_INTERVAL, sendRequest);
+
+  request2.onReadyStateChange(requestWeatherData);
+  ticker1.attach(WEATHER_REQUEST_INTERVAL, sendWeatherRequest);
+
+  sendRequest();  // Send first request now
+
+  secureEsp32FOTA._host = File_Updater_Host; //e.g. example.com
+  secureEsp32FOTA._descriptionOfFirmwareURL = File_Updater_Description; //e.g. /my-fw-versions/firmware.json
+  secureEsp32FOTA._certificate = test_root_ca;
+  secureEsp32FOTA.clientForOta = clientForOta;
+
+  static bool requestOpenResult;
+  if (request2.readyState() == readyStateUnsent || request2.readyState() == readyStateDone) {
+    requestOpenResult = request2.open("GET", weatherServer);
+    if (requestOpenResult) {
+      // Only send() if open() returns true, or crash
+      request2.send();
+    }
+  }
+}
+
+int x = MATRIX_WIDTH; // Used to figure out the start of the word as its dragged across the matrix
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED ) {
+
+    checkForUpdate(); // Checks if the arduino can be updated
+
+    if (DB_AllOn == "false" || selection == "off") { // If the "AllOn" variable from RoomLights is false or if the current selection is off
+      for (int i = 0; i < NUM_LEDS; i++)             // turn all LEDs off
+        leds[i].setRGB(0, 0, 0);
+      FastLED.show();
+      return;
+    }
+
+    if (selection == "text") {
+      printWord(DB_Word);
+    } else if (selection == "rainbow") {
+      Rainbow(1, 225);
+    } else if (selection == "time") {
+      printTime(true);
+    } else if (selection == "weather") {
+      printWeather();
+    }
+
+  } else {
+    printWord("WiFi Disconnected...");
+  }
+  FastLED.show();
+}
+
+void printWord(String Word) {
+  matrix->setFont(NULL);
+  textPass = true;
+  textDelay = Word.length() * -6;
+  x = matrix->width();
+  while (textPass == true) {
+    if (selection != "text") {
+      return;
+    }
+    if (DB_Word != Word) {
+      return;
+    }
+    setBackgroundColor(backgroundColorR, backgroundColorG, backgroundColorB); // Set Background Color
+    matrix->setCursor(x, 0);
+    matrix->print(Word);
+    if (--x < textDelay) {
+      x = matrix->width();
+      textPass = false;
+    }
+    FastLED.delay(100);
+    matrix->show();
+  }
+}
+
+int rainIndex = 0;
+
+void printWeather() {
+  String Weather = weatherTemp + "oF";
+  matrix->setFont(&AlexFont);
+  if (selection != "weather") {
+    return;
+  }
+  setBackgroundColor(backgroundColorR, backgroundColorG, backgroundColorB); // Set Background Color
+  matrix->setCursor(15, 0);
+  matrix->print(Weather);
+
+  if (weatherImage == "Clouds") {
+    printCloudy();
+  } else if (weatherImage == "Clear") {
+    printClear();
+  } else if (weatherImage == "Rain" || weatherImage == "Drizzle") {
+    printRain("Rain");
+  } else if (weatherImage == "Snow") {
+    printRain("Snow");
+  } else {
+    printUnknownWeather();
+  }
+  matrix->show();
+  rainIndex++;
+  FastLED.delay(100);
+}
+
+void printTime(bool border) {
+  matrix->setFont(&AlexFont);
+  bool timePass = true; // Tells when to restart the time at the right side of the matrix
+  x = matrix->width();
+
+  while (timePass) { // While true
+    if (selection != "time") {
+      return;
+    }
+
+    while (!timeClient.update()) {                                               //makes sure that the time keeps updating
+      timeClient.forceUpdate();
+    }
+
+    formattedDate = timeClient.getFormattedDate();                               //gets the date as a string from the web
+    int splitT = formattedDate.indexOf("T");                                     //splits the first part of the string to the day
+    dayStamp = formattedDate.substring(0, splitT);
+    timeStamp = formattedDate.substring(splitT + 1, formattedDate.length() - 4); //changes the date to only the time and date
+    hour = timeStamp.substring(0, 2);                                            //takes the hour from the string
+    minute = timeStamp.substring(3, 5);                                          //takes the minute from the string
+    setBackgroundColor(backgroundColorR, backgroundColorG, backgroundColorB);    // Set Background Color
+    //matrix->fillScreen(backgroundColor);                                                      //clears the prevois screen to make the time go over everything
+    matrix->setCursor(x, 0);                                                    //sets the cursor to start displaying the letters moving from left to right
+    if (hour.toInt() > 12)
+      hour = String(hour.toInt() % 12);                                         //changes the hour to 12hr time
+    matrix->print(hour + ":" + minute);                                         //prints the time to the LED matrix
+
+    if (--x < -30) {                                                            //tests if the whole time is off of the screen
+      x = MATRIX_WIDTH;                                                          //moves the cursor one pixel to the left
+      timePass = false;
+    }
+
+    if (border)
+      RainbowBorder();
+
+    FastLED.delay(100);
+    matrix->show();
+  }
+}
+
+void Rainbow(int loops, int ledsToRepeat) {
+  rainbowCounter++;
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = CHSV(i - (rainbowCounter * 2), 255, 255);                     /* The higher the value 4 the less fade there is and vice versa */
+  }
+  FastLED.show();
+  delay(100);
+}
+
+void RainbowBorder() {
+  static int x = 0;
+  x++;
+  for (int i = 0; i < 78; i++) {        //makes a loop and sets a color to every pixel in the border in counter clockwise order starting with the top right
+    leds[border[i]].setHue((i + x) * (6.6)); //sets the color to a rainbow and makes the rainbow perfectly flow between the amount of pixels in the border.
+  }
+}
+
+void printCloudy() {
+  //drawing cloud
+  int cloud[] = {254, 253, 243, 240, 239, 236, 227, 224, 223, 220, 212, 208, 207, 203, 196, 192, 191, 187, 179, 176, 175, 173, 161};
+  for (int i = 0; i < 23; i++) {
+    leds[cloud[i]].setRGB(255, 255, 255);
+  }
+  int sunBehindCloud[] = {244, 235, 234, 230, 229, 228, 219, 218, 217, 214, 213, 202, 201, 198, 197, 186, 180};
+  //Drawing Sun behind clouds
+  for (int i = 0; i < 17; i++) {
+    leds[sunBehindCloud[i]].setRGB(255, 255, 0);
+  }
+}
+
+void printClear() {
+  //drawing sun
+  int sunAlone[] = {239, 238, 237, 227, 226, 225, 224, 223, 222, 221, 220, 219, 212, 211, 210, 209, 208, 207, 206, 205, 204, 203, 196, 195, 194, 193, 192, 191, 190, 189, 188, 187, 179, 178, 177, 176, 175, 174, 173};
+  for (int i = 0; i < 39; i++) {
+    leds[sunAlone[i]].setRGB(255, 255, 0);
+  }
+}
+
+void printRain(String SnowOrRain) {
+  //drawing cloud
+  int rainCloud[] = {251, 250, 246, 243, 236, 233, 230, 227, 220, 217, 215, 211, 204, 200, 199, 195, 188, 184, 182, 179, 172, 170, 164};
+  for (int i = 0; i < 23; i++) {
+    leds[rainCloud[i]].setRGB(255, 255, 255);
+  }
+  int rain1[] = {242, 225, 209, 191, 173};
+  int rain2[] = {241, 224, 208, 189, 174};
+  int rain3[] = {240, 226, 210, 190, 175};
+  int rParticle;
+  int gParticle;
+  int bParticle;
+
+
+  if (SnowOrRain == "Rain") {
+    rParticle = 0;
+    gParticle = 0;
+    bParticle = 255;
+  } else if (SnowOrRain == "Snow") {
+    rParticle = 255;
+    gParticle = 255;
+    bParticle = 255;
+  }
+
+  if (rainIndex % 3 == 0) {
+    for (int i = 0; i < 5; i++) {
+      leds[rain1[i]].setRGB(rParticle, gParticle, bParticle);
+    }
+  }
+  if (rainIndex % 3 == 1) {
+
+    for (int i = 0; i < 5; i++) {
+      leds[rain2[i]].setRGB(rParticle, gParticle, bParticle);
+    }
+  }
+  if (rainIndex % 3 == 2) {
+    for (int i = 0; i < 5; i++) {
+      leds[rain3[i]].setRGB(rParticle, gParticle, bParticle);
+    }
+  }
+}
+
+void printUnknownWeather() {
+  int questionMarks[] = {246, 245, 231, 232, 227, 226, 224, 220, 216, 214, 213, 212, 198, 197, 184, 183, 179, 178, 176, 172, 168, 166, 165, 164};
+  for (int i = 0; i < 24; i++) {
+    leds[questionMarks[i]].setRGB(255, 255, 255);
+  }
+}
+
+void sendRequest() {
+  static bool requestOpenResult;
+
+  if (request.readyState() == readyStateUnsent || request.readyState() == readyStateDone) {
+    requestOpenResult = request.open("GET", serverName);
+    if (requestOpenResult) {
+      request.send();
+    } else {
+      Serial.println("Can't send bad request");
+    }
+  } else {
+    Serial.println("Can't send request");
+  }
+}
+
+void sendWeatherRequest() {
+  currentMillis = millis();
+  if (currentMillis - previousMillis > WEATHER_INTERVAL) {
+    previousMillis = millis();
+    static bool requestOpenResult;
+    if (request2.readyState() == readyStateUnsent || request2.readyState() == readyStateDone) {
+      requestOpenResult = request2.open("GET", weatherServer);
+      if (requestOpenResult) {
+        // Only send() if open() returns true, or crash
+        request2.send();
+      } else {
+        Serial.println("Can't send bad request");
+      }
+    } else {
+      Serial.println("Can't send request");
+    }
+  } else {
+    //Serial.println("Cannot request weather yet");
+  }
+}
+
+void requestCB(void* optParm, AsyncHTTPRequest* request, int readyState) {
+  (void) optParm;
+  if (readyState == readyStateDone) {
+    DB_String = request->responseText();
+    request->setDebug(false);
+
+    String payload = DB_String;
+
+    if (payload != "" || !payload.equals("")) {
+      delimiter1 = payload.indexOf(delimiter);
+      DB_Name = payload.substring(1, delimiter1);
+
+      delimiter2 = payload.indexOf(delimiter, delimiter1 + 1);
+      selection = payload.substring(delimiter1 + 1, delimiter2);
+
+      delimiter3 = payload.indexOf(delimiter, delimiter2 + 1);
+      DB_Word = payload.substring(delimiter2 + 1, delimiter3);
+
+      delimiter4 = payload.indexOf(delimiter, delimiter3 + 1);
+      DB_Brightness = payload.substring(delimiter3 + 1, delimiter4);
+
+      delimiter5 = payload.indexOf(delimiter, delimiter4 + 1);
+      DB_TextColor = payload.substring(delimiter4 + 1, delimiter5);
+
+      delimiter6 = payload.indexOf(delimiter, delimiter5 + 1);
+      DB_BackgroundColor = payload.substring(delimiter5 + 1, delimiter6);
+
+      delimiter7 = payload.indexOf(delimiter, delimiter6 + 1);
+      DB_AllOn = payload.substring(delimiter6 + 1, delimiter7);
+
+      delimiter8 = payload.indexOf(delimiter, delimiter7 + 1);
+      DB_VersionNumber = payload.substring(delimiter7 + 1, delimiter8);
+
+      Serial.println("Name: " + DB_Name);
+      Serial.println("Selection: " + selection);
+      Serial.println("Word: " + DB_Word);
+      Serial.println("Brightness: " + DB_Brightness);
+      Serial.println("TextColor: " + DB_TextColor);
+      Serial.println("BackgroundColor: " + DB_BackgroundColor);
+      Serial.println("AllOn: " + DB_AllOn);
+      Serial.println("Version: " + DB_VersionNumber);
+      Serial.println("");
+
+      if (DB_TextColor == "Red") {
+        matrix->setTextColor(matrix->Color(255, 0, 0));
+      } else if (DB_TextColor == "Orange") {
+        matrix->setTextColor(matrix->Color(255, 165, 0));
+      } else if (DB_TextColor == "Yellow") {
+        matrix->setTextColor(matrix->Color(255, 255, 0));
+      } else if (DB_TextColor == "Green") {
+        matrix->setTextColor(matrix->Color(0, 255, 0));
+      } else if (DB_TextColor == "Blue") {
+        matrix->setTextColor(matrix->Color(0, 0, 255));
+      } else if (DB_TextColor == "Purple") {
+        matrix->setTextColor(matrix->Color(255, 0, 255));
+      } else if (DB_TextColor == "None") {
+        matrix->setTextColor(matrix->Color(0, 0, 0));
+      } else {
+        matrix->setTextColor(matrix->Color(DB_TextColor.substring(0, 3).toInt(), DB_TextColor.substring(4, 7).toInt(), DB_TextColor.substring(8, 11).toInt()));
+      }
+
+      if (DB_BackgroundColor == "Red") {
+        backgroundColorR = 255; backgroundColorG = 0; backgroundColorB = 0;
+      } else if (DB_BackgroundColor == "Orange") {
+        backgroundColorR = 255; backgroundColorG = 165; backgroundColorB = 0;
+      } else if (DB_BackgroundColor == "Yellow") {
+        backgroundColorR = 255; backgroundColorG = 255; backgroundColorB = 0;
+      } else if (DB_BackgroundColor == "Green") {
+        backgroundColorR = 0; backgroundColorG = 255; backgroundColorB = 0;
+      } else if (DB_BackgroundColor == "Blue") {
+        backgroundColorR = 0; backgroundColorG = 0; backgroundColorB = 255;
+      } else if (DB_BackgroundColor == "Purple") {
+        backgroundColorR = 255; backgroundColorG = 50; backgroundColorB = 165;
+      } else if (DB_BackgroundColor == "None") {
+        backgroundColorR = 0; backgroundColorG = 0; backgroundColorB = 0;
+      } else {
+        backgroundColorR = DB_BackgroundColor.substring(0, 3).toInt();
+        backgroundColorG = DB_BackgroundColor.substring(4, 7).toInt();
+        backgroundColorB = DB_BackgroundColor.substring(8, 11).toInt();
+      }
+      matrix->setBrightness(DB_Brightness.toInt());
+    }
+    request->setDebug(false);
+  }
+}
+
+void requestWeatherData(void* optParm, AsyncHTTPRequest* request2, int readyState) {
+  (void) optParm;
+  int weatherImageIndex = 0;
+  int weatherTempIndex = 0;
+
+  if (readyState == readyStateDone) {
+    weatherData = request2->responseText();//gets the FULL string weather data from the webstie API
+
+    weatherImageIndex = weatherData.indexOf("main\":\"");//finds the index of the weather status (cloudy, sunny, etc.)
+    weatherImage = weatherData.substring(weatherImageIndex + 7, weatherData.indexOf("\"", weatherImageIndex + 8));
+
+    weatherTempIndex = weatherData.indexOf("temp\":");
+    weatherTemp = weatherData.substring(weatherTempIndex + 6, weatherData.indexOf(",", weatherTempIndex + 7));
+
+    float weatherTempFloat = weatherTemp.toFloat();
+    weatherTempFloat = round(weatherTempFloat);
+    int WeatherTempInt = weatherTempFloat;
+    weatherTemp = String(WeatherTempInt);
+  }
+}
+
+void setBackgroundColor(int r, int g, int b) {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i].setRGB(r, g, b);
+  }
+}
+
+void checkForUpdate() {
+  if (DB_VersionNumber.toFloat() > ASYNC_MESSAGE_BOARD_VERSION) { // tests if the available version is newer than the current version
+
+    matrix->setCursor(1, 0); // sets the message position on the board
+    matrix->setTextColor(matrix->Color(255, 255, 255));//sets the text color to white
+    setBackgroundColor(0, 0, 0);
+    matrix->print("Update"); // prints update on the LEDs
+    matrix->show(); // shows the updated LEDs
+
+    ticker1.detach(); // stops the tickers to run the update URL
+    ticker.detach();
+
+    bool shouldExecuteFirmwareUpdate = secureEsp32FOTA.execHTTPSCheck(); // checks to see if update can be ran
+
+    if (shouldExecuteFirmwareUpdate) {
+      setBackgroundColor(backgroundColorR, backgroundColorG, backgroundColorB); // Set Background Color
+      secureEsp32FOTA.executeOTA(); // starts the update
+    }
+  }
+}
