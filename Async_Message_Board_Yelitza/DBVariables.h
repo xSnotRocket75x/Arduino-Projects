@@ -1,6 +1,21 @@
 #ifndef Variables_H
 #define Variables_H
 
+/*
+ 
+          -----------------------------------IMPORTANT-----------------------------------
+          
+                        DO NOT FORGET TO UPDATE AND DOUBLE CHECK THESE VALUES
+                        
+              1) ASYNC_MESSAGE_BOARD_VERSION
+              2) SSID AND PASSWORD
+              3) END OF SERVERNAME CORRESPONDS TO THE USER
+              4) WEATHERSERVER CORRESPONDS TO THE LOCATION OF THE USER
+              5) FILE_UPDATER_DESCRIPTION HAS "Async_Message_Board_" THEN THE USER
+
+ */
+
+
 
 #define PIN 5   //pin for the LED matrix
 #define MATRIX_WIDTH 32
