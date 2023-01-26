@@ -29,9 +29,11 @@
 
 #define NUM_LEDS (MATRIX_WIDTH*MATRIX_HEIGHT) // Calculates the number of LEDs based on the height times the width
 
-AsyncWebServer server(80); //starts to read the web HTML with the port 80
+AsyncWebServer server(80); // starts to read the web HTML with the port 80
 AsyncHTTPRequest request;  // Request for AlexsRandomTech
 AsyncHTTPRequest request2; // Request for the weather
+
+WiFiMulti wifiMulti; // Object that can connect to multiple different networks
 
 // Tickers to attach to each of the requests and send each HTTP request asynchronously
 Ticker ticker;
@@ -64,7 +66,6 @@ static bool textPass = true;
 
 // Variables to read the DB every 5 seconds instead of using delay()
 unsigned long currentMillis, previousMillis;
-unsigned long Read_DB_Frequency = 5000;
 
 // Variables to store data from DB
 const char* DB_NAME;
@@ -79,6 +80,11 @@ float       DB_VERSIONNUMBER;
 // Variables to store weather data
 String WEATHER_IMAGE;
 int WEATHER_TEMP;
+
+// Initalizes the variables to later set depending on which network the board is connected to
+const char* serverName;
+const char* weatherServer;
+const char* File_Updater_Description;
 
 // makes an array with the amount of lights
 CRGB leds[NUM_LEDS];
@@ -99,13 +105,15 @@ void setup() {
   // Continue while the serial is available
   while (!Serial);
 
-  // Set the WiFi mode so that the ESP32 can connect to a network
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);               // connects the ESP to the wifi
-  while (WiFi.status() != WL_CONNECTED) {   //test if the wifi is connected or not
-    delay(500);
-    Serial.print(".");
+  wifiMulti.addAP(SSID1, PASSWORD1);
+  wifiMulti.addAP(SSID2, PASSWORD2);
+  wifiMulti.addAP(SSID3, PASSWORD3);
+
+  if (wifiMulti.run() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.println("WiFi connected");
   }
+  currentNetwork();
 
   FastLED.addLeds<NEOPIXEL, PIN>(leds, NUM_LEDS);       //Initalizes the leds
   matrix->begin();                                      //Starts the matrix
@@ -171,13 +179,17 @@ void setup() {
       request2.send();
     }
   }
+
 }
 
 // Used to keep track of the position of the time and word when it is dragged sideways across the matrix
 int x = MATRIX_WIDTH;
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED ) {
+
+  if (wifiMulti.run() == WL_CONNECTED) {
+
+    currentNetwork();
 
     checkForUpdate(); // Checks if the arduino can be updated
 
@@ -201,7 +213,7 @@ void loop() {
 
     // If the WiFi loses connection, the LEDs will tell you
   } else {
-    printWord("WiFi Disconnected...");
+    Serial.println("Not Connected");
   }
   FastLED.show();
 }
@@ -450,15 +462,15 @@ void printUnknownWeather() {
 void sendRequest() {
   static bool requestOpenResult;
 
-  if (request.readyState() == readyStateUnsent || request.readyState() == readyStateDone) {
+  if ((request.readyState() == readyStateUnsent) || (request.readyState() == readyStateDone)) {
     requestOpenResult = request.open("GET", serverName);
     if (requestOpenResult) {
       request.send();
     } else {
-      Serial.println("Can't send bad request");
+      Serial.println("Can't send bad ART request");
     }
   } else {
-    Serial.println("Can't send request");
+    Serial.println("Can't send ART request");
   }
 }
 
@@ -474,10 +486,10 @@ void sendWeatherRequest() {
         // Only send() if open() returns true, or crash
         request2.send();
       } else {
-        Serial.println("Can't send bad request");
+        Serial.println("Can't send bad weather request");
       }
     } else {
-      Serial.println("Can't send request");
+      Serial.println("Can't send weather request");
     }
   } else {
     //Serial.println("Cannot request weather yet");
@@ -501,7 +513,7 @@ void requestCB(void* optParm, AsyncHTTPRequest* request, int readyState) {
       // If there is an error parsing the data, do not continue
       if (JSON_error) {
         while (JSON_error) {
-          Serial.print("deserializeJson() failed: ");
+          Serial.print("ART -> deserializeJson() failed: ");
           Serial.println(JSON_error.c_str());
           DeserializationError JSON_error = deserializeJson(DB_Doc, payload);
         }
@@ -516,20 +528,6 @@ void requestCB(void* optParm, AsyncHTTPRequest* request, int readyState) {
       DB_BACKGROUNDCOLOR = DB_Doc["backgroundColor"]; // "255,255,255"
       DB_ALLON =           DB_Doc["allOn"]; // true
       DB_VERSIONNUMBER =   DB_Doc["versionNumber"]; // 1.00
-
-      /*
-            Serial.println("----------");
-            Serial.println(DB_NAME);
-            Serial.println(DB_SELECTION);
-            Serial.println(DB_WORD);
-            Serial.println(DB_BRIGHTNESS);
-            Serial.println(DB_TEXTCOLOR);
-            Serial.println(DB_BACKGROUNDCOLOR);
-            Serial.println(DB_ALLON);
-            Serial.println(DB_VERSIONNUMBER);
-            Serial.println("----------");
-
-      */
 
       if (strcmp(DB_TEXTCOLOR, "Red") == 0) {
         matrix->setTextColor(matrix->Color(255, 0, 0));
@@ -579,20 +577,12 @@ void requestWeatherData(void* optParm, AsyncHTTPRequest* request2, int readyStat
   (void) optParm;
 
   if (readyState == readyStateDone) {
-
     // Creates a buffer to hold all the data in the data from the URL
     StaticJsonDocument<1024> weatherDoc;
     DeserializationError JSON_Weather_error = deserializeJson(weatherDoc, request2->responseText());
 
     // Makes sure the document is read
     if (JSON_Weather_error) {
-
-      // Keeps trying to read the document
-      while (JSON_Weather_error) {
-        Serial.print("deserializeJson() failed: ");
-        Serial.println(JSON_Weather_error.c_str());
-        DeserializationError JSON_Weather_error = deserializeJson(weatherDoc, request2->responseText());
-      }
       return;
     }
 
@@ -629,5 +619,23 @@ void checkForUpdate() {
       setBackgroundColor(backgroundColorR, backgroundColorG, backgroundColorB); // Set Background Color
       secureEsp32FOTA.executeOTA(); // starts the update
     }
+  }
+}
+
+void currentNetwork() {
+  if (WiFi.SSID() == SSID1) { // If connected to Yelitza's WiFi
+    serverName = SERVER_NAME_YELITZA;
+    weatherServer = WEATHER_SERVER_YELITZA;
+    File_Updater_Description = File_Updater_Description_YELITZA;
+  } else if (WiFi.SSID() == SSID2) {
+    serverName = SERVER_NAME_ALEX;
+    weatherServer = WEATHER_SERVER_ALEX;
+    File_Updater_Description = File_Updater_Description_ALEX;
+  } else if (WiFi.SSID() == SSID3) {
+    serverName = SERVER_NAME_ALEX;
+    weatherServer = WEATHER_SERVER_ALEX;
+    File_Updater_Description = File_Updater_Description_ALEX;
+  } else {
+    Serial.println("Unknown Network");
   }
 }
