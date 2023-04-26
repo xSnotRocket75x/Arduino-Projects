@@ -18,9 +18,10 @@
 #define MATRIX_HEIGHT 8
 
 
-#define HTTP_REQUEST_INTERVAL         0.5       //how often the AlexsRandomTech request gets sent (in seconds)
+#define HTTP_REQUEST_INTERVAL         1       //how often the AlexsRandomTech request gets sent (in seconds)
 int WEATHER_REQUEST_INTERVAL =        1;        //how often the weather data request gets sent (in seconds)
 #define WEATHER_INTERVAL              300000    //how often the weather function checks if new data is there (in ms)
+#define WEATHER_CHANGE_FREQUENCY      5000     //how often the weather and time switch positions (in ms)
 
 
 float   ASYNC_MESSAGE_BOARD_VERSION = 1;        //the current version of the messageboard
