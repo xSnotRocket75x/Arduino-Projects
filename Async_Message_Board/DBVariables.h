@@ -24,7 +24,7 @@ int WEATHER_REQUEST_INTERVAL =        1;        //how often the weather data req
 #define WEATHER_CHANGE_FREQUENCY      5000     //how often the weather and time switch positions (in ms)
 
 
-float   ASYNC_MESSAGE_BOARD_VERSION = 1;        //the current version of the messageboard
+float   ASYNC_MESSAGE_BOARD_VERSION = 1.0;        //the current version of the messageboard
 
 // The different SSIDs and Passwords that the ESP32 will try to connect to
 const char*  SSID1       = "Home";
